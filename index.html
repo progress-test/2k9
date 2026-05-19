@@ -285,7 +285,7 @@ textarea{width:100%;border:2px solid #E0E4EA;border-radius:10px;padding:14px 16p
         <b>⚠ Before you start:</b><br>
         • Switching tabs or opening other pages will be recorded<br>
         • The exam auto-submits when time runs out<br>
-        • Your essay is auto-saved every 10 seconds<br>
+        • Your essay is auto-saved every 5 seconds<br>
         • Your report will be downloaded and submitted automatically when you finish
       </div>
       <div style="margin-bottom:16px">
@@ -472,7 +472,97 @@ var vioNum=0,lastLeaveTs=0,imgZoom=100,activeTab=1;
 var AUTOSAVE_KEY='ielts_writing_lab_session';
 var AUTOSAVE_SUBMITTED_KEY='ielts_writing_lab_submitted';
 var autosaveInterval=null;
-var AUTOSAVE_MS=10000;
+var AUTOSAVE_MS=5000; /* save every 5 seconds (was 10s) */
+var DRIVE_SAVE_MS=60000;
+var driveSaveInterval=null;
+var lastDriveSaveOk=false;
+
+/* ═══════════════════════════════════════════
+   PERSISTENT STORAGE LAYER
+   Cookie-first (survives Safari iOS tab close)
+   localStorage as secondary write
+   Chunked cookies: each ≤3800 bytes to stay under 4KB limit
+   ═══════════════════════════════════════════ */
+var CHUNK_SIZE=3800;
+var COOKIE_PREFIX='iwl_';
+var COOKIE_DAYS=1;
+
+function setCookie(name,val,days){
+  var d=new Date();d.setTime(d.getTime()+days*86400000);
+  var ex='expires='+d.toUTCString();
+  document.cookie=name+'='+encodeURIComponent(val)+';'+ex+';path=/;SameSite=Lax';
+}
+function getCookie(name){
+  var prefix=name+'=';
+  var parts=document.cookie.split(';');
+  for(var i=0;i<parts.length;i++){
+    var c=parts[i].trim();
+    if(c.indexOf(prefix)===0)return decodeURIComponent(c.substring(prefix.length));
+  }
+  return null;
+}
+function deleteCookie(name){
+  document.cookie=name+'=;expires=Thu, 01 Jan 1970 00:00:00 UTC;path=/;SameSite=Lax';
+}
+
+function persistSet(key,jsonStr){
+  try{
+    var prefix=COOKIE_PREFIX+key+'_';
+    var oldN=parseInt(getCookie(prefix+'n'))||0;
+    for(var i=0;i<oldN;i++) deleteCookie(prefix+i);
+    var chunks=[];
+    for(var i=0;i<jsonStr.length;i+=CHUNK_SIZE){
+      chunks.push(jsonStr.substring(i,i+CHUNK_SIZE));
+    }
+    for(var i=0;i<chunks.length;i++){
+      setCookie(prefix+i,chunks[i],COOKIE_DAYS);
+    }
+    setCookie(prefix+'n',String(chunks.length),COOKIE_DAYS);
+  }catch(e){}
+  try{localStorage.setItem(AUTOSAVE_KEY,jsonStr)}catch(e){}
+}
+
+function persistGet(key){
+  try{
+    var prefix=COOKIE_PREFIX+key+'_';
+    var n=parseInt(getCookie(prefix+'n'))||0;
+    if(n>0){
+      var parts=[];
+      for(var i=0;i<n;i++){
+        var chunk=getCookie(prefix+i);
+        if(chunk===null){n=0;break}
+        parts.push(chunk);
+      }
+      if(parts.length===n&&n>0) return parts.join('');
+    }
+  }catch(e){}
+  try{return localStorage.getItem(AUTOSAVE_KEY)}catch(e){}
+  return null;
+}
+
+function persistDelete(key){
+  try{
+    var prefix=COOKIE_PREFIX+key+'_';
+    var n=parseInt(getCookie(prefix+'n'))||0;
+    for(var i=0;i<n;i++) deleteCookie(prefix+i);
+    deleteCookie(prefix+'n');
+  }catch(e){}
+  try{localStorage.removeItem(AUTOSAVE_KEY)}catch(e){}
+}
+
+function persistSetSmall(name,val){
+  try{setCookie(COOKIE_PREFIX+name,val,COOKIE_DAYS)}catch(e){}
+  try{localStorage.setItem(name,val)}catch(e){}
+}
+function persistGetSmall(name){
+  try{var v=getCookie(COOKIE_PREFIX+name);if(v)return v}catch(e){}
+  try{return localStorage.getItem(name)}catch(e){}
+  return null;
+}
+function persistDeleteSmall(name){
+  try{deleteCookie(COOKIE_PREFIX+name)}catch(e){}
+  try{localStorage.removeItem(name)}catch(e){}
+}
 
 function $(id){return document.getElementById(id)}
 function D(id,v){$(id).classList.toggle('hidden',!v)}
@@ -486,42 +576,78 @@ function autosaveState(){
   var ta1=$('essayTA'),ta2=$('essayTA2');
   if(ta1)S.essay=ta1.value||S.essay;
   if(ta2&&ta2.style.display!=='none')S.essay2=ta2.value||S.essay2;
-  var saveObj={
+
+  /* ── Cookie: essay text + minimal metadata only (no img) ── */
+  var cookieObj={
     test:S.test,task:S.task,name:S.name,cls:S.cls,
-    prompt:S.prompt,prompt2:S.prompt2,
     essay:S.essay,essay2:S.essay2,
     tl:S.tl,total:S.total,
     t0:S.t0?S.t0.toISOString():null,
-    vio:S.vio,snaps:S.snaps,
     vioNum:vioNum,device:S.device,
     activeTab:activeTab,
     savedAt:new Date().toISOString()
   };
+  persistSet('s',JSON.stringify(cookieObj));
+
+  /* ── localStorage: full data (prompt, snaps, vio) ── */
   try{
-    localStorage.setItem(AUTOSAVE_KEY,JSON.stringify(saveObj));
-    showAutosaveStatus('saved');
-  }catch(e){
-    showAutosaveStatus('saved');
-  }
+    var fullObj={
+      test:S.test,task:S.task,name:S.name,cls:S.cls,
+      prompt:S.prompt,prompt2:S.prompt2,
+      essay:S.essay,essay2:S.essay2,
+      tl:S.tl,total:S.total,
+      t0:S.t0?S.t0.toISOString():null,
+      vio:S.vio,snaps:S.snaps,
+      vioNum:vioNum,device:S.device,
+      activeTab:activeTab,
+      savedAt:new Date().toISOString()
+    };
+    localStorage.setItem(AUTOSAVE_KEY,JSON.stringify(fullObj));
+  }catch(e){}
+
+  showAutosaveStatus('saved');
 }
 function showAutosaveStatus(status){
   var ind=$('autoSaveInd');if(!ind)return;
   if(status==='saving'){ind.innerHTML='<span class="autosave-dot saving"></span>Saving...'}
   else{ind.innerHTML='<span class="autosave-dot saved"></span>Saved'}
 }
-function clearAutosave(){try{localStorage.removeItem(AUTOSAVE_KEY)}catch(e){}}
+function clearAutosave(){persistDelete('s')}
 function getSavedSession(){
   try{
-    var raw=localStorage.getItem(AUTOSAVE_KEY);if(!raw)return null;
+    var raw=persistGet('s');if(!raw)return null;
     var obj=JSON.parse(raw);
-    var submitted=localStorage.getItem(AUTOSAVE_SUBMITTED_KEY);
-    if(submitted){var subData=JSON.parse(submitted);if(subData.t0===obj.t0){clearAutosave();localStorage.removeItem(AUTOSAVE_SUBMITTED_KEY);return null}}
+    var submitted=persistGetSmall(AUTOSAVE_SUBMITTED_KEY);
+    if(submitted){var subData=JSON.parse(submitted);if(subData.t0===obj.t0){clearAutosave();persistDeleteSmall(AUTOSAVE_SUBMITTED_KEY);return null}}
     if(obj.savedAt){var age=Date.now()-new Date(obj.savedAt).getTime();if(age>4*60*60*1000){clearAutosave();return null}}
     return obj;
   }catch(e){return null}
 }
-function startAutosave(){if(autosaveInterval)clearInterval(autosaveInterval);autosaveInterval=setInterval(function(){showAutosaveStatus('saving');autosaveState()},AUTOSAVE_MS)}
-function stopAutosave(){if(autosaveInterval){clearInterval(autosaveInterval);autosaveInterval=null}}
+function startAutosave(){if(autosaveInterval)clearInterval(autosaveInterval);autosaveInterval=setInterval(function(){showAutosaveStatus('saving');autosaveState()},AUTOSAVE_MS);startDriveSave()}
+function stopAutosave(){if(autosaveInterval){clearInterval(autosaveInterval);autosaveInterval=null}stopDriveSave()}
+
+/* ═══ DRIVE AUTO-SAVE (every 60s) ═══ */
+function showDriveSaveStatus(status){
+  var ind=$('autoSaveInd');if(!ind)return;
+  if(status==='drive-saving'){ind.innerHTML='<span class="autosave-dot saving"></span>☁ Saving to Drive...'}
+  else if(status==='drive-ok'){ind.innerHTML='<span class="autosave-dot saved"></span>☁ Drive saved';lastDriveSaveOk=true}
+  else if(status==='drive-fail'){ind.innerHTML='<span class="autosave-dot" style="background:#E63946"></span>☁ Save failed';lastDriveSaveOk=false}
+  else if(status==='saving'){ind.innerHTML='<span class="autosave-dot saving"></span>Saving...'}
+  else{ind.innerHTML='<span class="autosave-dot saved"></span>Saved'}
+}
+function driveSaveNow(){
+  if(!S.run||!S.url)return;
+  autosaveState();
+  var data=rdata();
+  data.isAutoSave=true;
+  data.autoSaveTime=new Date().toISOString();
+  showDriveSaveStatus('drive-saving');
+  fetch(S.url,{method:'POST',mode:'no-cors',headers:{'Content-Type':'text/plain'},body:JSON.stringify(data)})
+  .then(function(){showDriveSaveStatus('drive-ok');setTimeout(function(){if(S.run)showAutosaveStatus('saved')},3000)})
+  .catch(function(){showDriveSaveStatus('drive-fail');setTimeout(function(){if(S.run)showAutosaveStatus('saved')},3000)});
+}
+function startDriveSave(){if(driveSaveInterval)clearInterval(driveSaveInterval);driveSaveInterval=setInterval(driveSaveNow,DRIVE_SAVE_MS)}
+function stopDriveSave(){if(driveSaveInterval){clearInterval(driveSaveInterval);driveSaveInterval=null}}
 
 /* ═══ RECOVERY ═══ */
 function checkRecovery(){
@@ -691,29 +817,53 @@ function updVio(){if(vioNum>0){D('vBdg',1);$('vCntH').textContent=vioNum}}
 
 /* ═══ SUBMIT ═══ */
 var isSubmitting=false;
+var alreadySubmitted=false; /* prevent duplicate Drive files */
 function doSubmit(){
   if(!S.run||isSubmitting)return;isSubmitting=true;
+  alreadySubmitted=true;
   if(activeTab===1)S.essay=$('essayTA').value;if(activeTab===2)S.essay2=$('essayTA2').value;
   var ta1=$('essayTA').value,ta2=$('essayTA2').value;
   S.essay=ta1||S.essay;S.essay2=ta2||S.essay2;
   snap();clearInterval(S.ti);clearInterval(S.si);S.run=false;stopAutosave();releaseWakeLock();
   document.removeEventListener('visibilitychange',onVis);window.removeEventListener('blur',onBlur);
-  try{localStorage.setItem(AUTOSAVE_SUBMITTED_KEY,JSON.stringify({t0:S.t0?S.t0.toISOString():''}))}catch(e){}
+  try{persistSetSmall(AUTOSAVE_SUBMITTED_KEY,JSON.stringify({t0:S.t0?S.t0.toISOString():''}))}catch(e){}
   clearAutosave();review();setTimeout(function(){exportAndSubmit()},500);
 }
 
-/* ═══ EMERGENCY SUBMIT ═══ */
+/* ═══════════════════════════════════════════
+   EMERGENCY SUBMIT — beforeunload / pagehide
+   Submit data when browser/tab is closing
+   ═══════════════════════════════════════════ */
 function emergencySubmit(){
-  if(!S.run)return;
+  if(alreadySubmitted||!S.run)return;
+  alreadySubmitted=true;
   var ta1=$('essayTA'),ta2=$('essayTA2');
   if(ta1)S.essay=ta1.value||S.essay;if(ta2)S.essay2=ta2.value||S.essay2;
-  snap();autosaveState();
-  if(S.url&&navigator.sendBeacon){
-    var wasRunning=S.run;S.run=false;var payload=JSON.stringify(rdata());S.run=wasRunning;
-    try{navigator.sendBeacon(S.url,payload)}catch(e){}
+  snap();
+  autosaveState();
+  var rd=rdata();
+  rd.action='final';
+  var payload=JSON.stringify(rd);
+  S.run=false;
+  if(!S.url)return;
+  /* Primary: fetch with keepalive (survives page close) */
+  try{
+    fetch(S.url,{method:'POST',mode:'no-cors',keepalive:true,
+      headers:{'Content-Type':'text/plain'},body:payload});
+  }catch(e){
+    /* Fallback: sendBeacon */
+    try{navigator.sendBeacon(S.url,payload)}catch(e2){}
   }
 }
-window.addEventListener('beforeunload',function(e){if(S.run){emergencySubmit();e.preventDefault();e.returnValue='Your exam is still in progress!';return e.returnValue}});
+
+window.addEventListener('beforeunload',function(e){
+  if(S.run&&!alreadySubmitted){
+    emergencySubmit();
+    e.preventDefault();
+    e.returnValue='Your exam is still in progress!';
+    return e.returnValue;
+  }
+});
 window.addEventListener('pagehide',function(e){if(S.run)emergencySubmit()});
 if('onfreeze' in document){document.addEventListener('freeze',function(){if(S.run)emergencySubmit()})}
 
@@ -846,7 +996,7 @@ function exportDoc(){
 
 /* ═══ SUBMIT TO DRIVE ═══ */
 var driveRetryTimer=null,driveRetryCount=0,driveMaxRetries=120,driveData=null;
-function submitToDrive(){if(!S.url)return;driveRetryCount=0;driveData=JSON.stringify(rdata());attemptDriveSubmit()}
+function submitToDrive(){if(!S.url)return;driveRetryCount=0;var rd=rdata();rd.action='final';driveData=JSON.stringify(rd);attemptDriveSubmit()}
 function attemptDriveSubmit(){
   if(!driveData)return;driveRetryCount++;
   var retryMsg=driveRetryCount>1?' (attempt '+driveRetryCount+')':'';
