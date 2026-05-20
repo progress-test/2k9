@@ -623,8 +623,8 @@ function getSavedSession(){
     return obj;
   }catch(e){return null}
 }
-function startAutosave(){if(autosaveInterval)clearInterval(autosaveInterval);autosaveInterval=setInterval(function(){showAutosaveStatus('saving');autosaveState()},AUTOSAVE_MS);startDriveSave()}
-function stopAutosave(){if(autosaveInterval){clearInterval(autosaveInterval);autosaveInterval=null}stopDriveSave()}
+function startAutosave(){if(autosaveInterval)clearInterval(autosaveInterval);autosaveInterval=setInterval(function(){showAutosaveStatus('saving');autosaveState()},AUTOSAVE_MS)}
+function stopAutosave(){if(autosaveInterval){clearInterval(autosaveInterval);autosaveInterval=null}}
 
 /* ═══ DRIVE AUTO-SAVE (every 60s) ═══ */
 function showDriveSaveStatus(status){
@@ -860,7 +860,7 @@ window.addEventListener('beforeunload',function(e){
   if(S.run&&!alreadySubmitted){
     emergencySubmit();
     e.preventDefault();
-    e.returnValue='Your exam is still in progress!';
+    e.returnValue='⚠️ Bạn đang trong giờ thi! Đóng tab sẽ làm mất dữ liệu chưa nộp. Bạn có chắc muốn rời đi?';
     return e.returnValue;
   }
 });
